@@ -5,6 +5,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -13,16 +15,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-)
-
-var (
-	// pongWait is how long we will await a pong response from client
-	pongWait = 10 * time.Second
-
-	// pingInterval has to be less than pongWait. We van can't multiply by 0.9 to get 90% of time
-	// Because that can make decimals, so instead *9 / 10 to get 90%
-	// The reason why it has to be less than PingFrequency is because otherwise it will send a new Ping before getting a response
-	pingInterval = (pongWait * 9) / 10
 )
 
 // In this context, var is used to declare a block of variables in Go (Golang).
@@ -53,13 +45,19 @@ type Manager struct {
 
 	// handlers are functions that are used to hande Events
 	handlers map[string]EventHandler
+
+	// otps is a map of allowed OTP to accept connections from
+	otps RetentionMap
 }
 
 // NewManager is used to initalize all the values inside the manager
-func NewManager() *Manager {
+func NewManager(ctx context.Context) *Manager {
 	m := &Manager{
 		clients:  make(ClientList),
 		handlers: make(map[string]EventHandler),
+
+		// Create a new retentionMap that remove OTPS older than 5 senconds
+		otps: NewRetentionMap(ctx, 20*time.Second),
 	}
 	m.setupEventHandlers()
 	return m
@@ -75,7 +73,7 @@ func checkOrigin(r *http.Request) bool {
 	case "http://localhost:8080":
 		return true
 	default:
-		return false
+		return true
 	}
 }
 
@@ -103,6 +101,22 @@ func (m *Manager) reouteEvent(event Event, c *Client) error {
 
 // serveWS is a HTTP Handler that has the Manager that allows connections
 func (m *Manager) serveWS(w http.ResponseWriter, r *http.Request) {
+
+	// Grab the OTP int the Get param
+	otp := r.URL.Query().Get("otp")
+	fmt.Println(otp)
+	if otp == "" {
+		// Tell the user its not authorized
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Verify OTP is existing
+	if !m.otps.VerifyOTP(otp) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
 	log.Println("New connections")
 	// Begin by upgrading the HTTP request
 	conn, err := websocketUpgrader.Upgrade(w, r, nil)
@@ -120,7 +134,7 @@ func (m *Manager) serveWS(w http.ResponseWriter, r *http.Request) {
 	// start the read / write processes
 	// we are going to have two goroutines
 	go client.readMessages()
-	go client.WriteMessages()
+	go client.writeMessages()
 
 	// We won't do anything yet so close connection again
 	// conn.Close()
@@ -148,4 +162,51 @@ func (m *Manager) removeClient(client *Client) {
 		// remove
 		delete(m.clients, client)
 	}
+}
+
+// loginHandler is used to verify user authentication and return one time password
+func (m *Manager) loginHandler(w http.ResponseWriter, r *http.Request) {
+
+	type userLoginRequest struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	var req userLoginRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		// fmt.Println(err.Error())
+		return
+	}
+
+	// Authenticate user / Verify Access token, what ever auth method you use
+	if req.Username == "arti" && req.Password == "123" {
+		// format to return otp into the frontend
+		type response struct {
+			OTP string `json:"otp"`
+		}
+
+		// add a new OTP
+		otp := m.otps.NewOTP()
+
+		resp := response{
+			OTP: otp.Key,
+		}
+
+		data, err := json.Marshal(resp)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		// Return a response to the Authenticated user with the OTP
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+		return
+
+	}
+
+	// Failer to auth
+	w.WriteHeader(http.StatusUnauthorized)
 }

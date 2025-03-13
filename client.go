@@ -8,6 +8,15 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var (
+	// pongWait is how long we will await a pong response from client
+	pongWait = 10 * time.Second
+	// pingInterval has to be less than pongWait, We cant multiply by 0.9 to get 90% of time
+	// Because that can make decimals, so instead *9 / 10 to get 90%
+	// The reason why it has to be less than PingRequency is becuase otherwise it will send a new Ping before getting response
+	pingInterval = (pongWait * 9) / 10
+)
+
 // ClientList is a map to help manage a map of clients
 type ClientList map[*Client]bool
 
@@ -98,7 +107,7 @@ func (c *Client) pongHandler(pongMsg string) error {
 }
 
 // writeMessages is a process that listens for new messages to output to the Client
-func (c *Client) WriteMessages() {
+func (c *Client) writeMessages() {
 
 	// Create ticker that triggers a ping at givent interval
 	ticker := time.NewTicker(pingInterval)
